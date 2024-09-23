@@ -13,6 +13,7 @@ const server = http.createServer(app);
 
 const port = config.PORT;
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 app.use(cors());
 
 connectDB();

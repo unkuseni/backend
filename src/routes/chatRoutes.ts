@@ -1,14 +1,19 @@
-import { Router, Request, Response } from 'express';
-import { authenticateToken } from '../middleware/auth';
-import { AuthRequest } from './authRoutes';
-import Message from '../models/message';
-import Conversation from '../models/conversation';
-
+import { Router, Response } from "express";
+import { authenticateToken } from "../middleware/auth";
+import { AuthRequest } from "./authRoutes";
+import Message from "../models/message";
+import Conversation from "../models/conversation";
 
 const router = Router();
 
-
 router.post("/chat", authenticateToken, (req: AuthRequest, res: Response) => {
+  if (req.user?.isGuest) {
+    return res.status(403).json({
+      success: false,
+      message: "Chat feature is not available for guest users",
+    });
+  }
+
   try {
     const { receiverId } = req.body;
     const senderId = req.user?._id;
@@ -19,7 +24,7 @@ router.post("/chat", authenticateToken, (req: AuthRequest, res: Response) => {
   }
 });
 
-router.post('/call', authenticateToken, (req: AuthRequest, res: Response) => {
+router.post("/call", authenticateToken, (req: AuthRequest, res: Response) => {
   try {
     const { receiverId } = req.body;
     const senderId = req.user?._id;
@@ -31,97 +36,115 @@ router.post('/call', authenticateToken, (req: AuthRequest, res: Response) => {
   }
 });
 
-router.post('/conversation', authenticateToken, async (req: AuthRequest, res: Response) => {
-  try {
-    const { participantId } = req.body;
-    const currentUserId = req.user?._id;
+router.post(
+  "/conversation",
+  authenticateToken,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const { participantId } = req.body;
+      const currentUserId = req.user?._id;
 
-    let conversation = await Conversation.findOne({
-      participants: { $all: [currentUserId, participantId] }
-    });
-
-    if (!conversation) {
-      conversation = new Conversation({
-        participants: [currentUserId, participantId]
+      let conversation = await Conversation.findOne({
+        participants: { $all: [currentUserId, participantId] },
       });
-      await conversation.save();
+
+      if (!conversation) {
+        conversation = new Conversation({
+          participants: [currentUserId, participantId],
+        });
+        await conversation.save();
+      }
+
+      res.json({ conversationId: conversation._id });
+    } catch (error) {
+      res
+        .status(500)
+        .json({ message: "Error creating/retrieving conversation", error });
     }
+  },
+);
 
-    res.json({ conversationId: conversation._id });
-  } catch (error) {
-    res.status(500).json({ message: 'Error creating/retrieving conversation', error });
-  }
-});
+router.get(
+  "/chat-history/:userId",
+  authenticateToken,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const currentUserId = req.user?._id;
+      const otherUserId = req.params.userId;
 
-router.get('/chat-history/:userId', authenticateToken, async (req: AuthRequest, res: Response) => {
-  try {
-    const currentUserId = req.user?._id;
-    const otherUserId = req.params.userId;
+      const messages = await Message.find({
+        $or: [
+          { sender: currentUserId, recipient: otherUserId },
+          { sender: otherUserId, recipient: currentUserId },
+        ],
+      }).sort({ timestamp: 1 });
 
-    const messages = await Message.find({
-      $or: [
-        { sender: currentUserId, recipient: otherUserId },
-        { sender: otherUserId, recipient: currentUserId }
-      ]
-    }).sort({ timestamp: 1 });
+      res.json(messages);
+    } catch (error) {
+      res.status(500).json({ message: "Error fetching chat history", error });
+    }
+  },
+);
 
-    res.json(messages);
-  } catch (error) {
-    res.status(500).json({ message: 'Error fetching chat history', error });
-  }
-});
+router.delete(
+  "/chat-history/:userId",
+  authenticateToken,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const currentUserId = req.user?._id;
+      const otherUserId = req.params.userId;
 
-router.delete('/chat-history/:userId', authenticateToken, async (req: AuthRequest, res: Response) => {
-  try {
-    const currentUserId = req.user?._id;
-    const otherUserId = req.params.userId;
+      await Message.deleteMany({
+        $or: [
+          { sender: currentUserId, recipient: otherUserId },
+          { sender: otherUserId, recipient: currentUserId },
+        ],
+      });
 
-    await Message.deleteMany({
-      $or: [
-        { sender: currentUserId, recipient: otherUserId },
-        { sender: otherUserId, recipient: currentUserId }
-      ]
-    });
+      res.json({ message: "Chat history deleted successfully" });
+    } catch (error) {
+      res.status(500).json({ message: "Error deleting chat history", error });
+    }
+  },
+);
 
-    res.json({ message: 'Chat history deleted successfully' });
-  } catch (error) {
-    res.status(500).json({ message: 'Error deleting chat history', error });
-  }
-});
+router.get(
+  "/chat-history/:userId",
+  authenticateToken,
+  async (req: AuthRequest, res: Response) => {
+    try {
+      const currentUserId = req.user?._id;
+      const otherUserId = req.params.userId;
+      const page = parseInt(req.query.page as string) || 1;
+      const limit = parseInt(req.query.limit as string) || 50;
 
-router.get('/chat-history/:userId', authenticateToken, async (req: AuthRequest, res: Response) => {
-  try {
-    const currentUserId = req.user?._id;
-    const otherUserId = req.params.userId;
-    const page = parseInt(req.query.page as string) || 1;
-    const limit = parseInt(req.query.limit as string) || 50;
+      const messages = await Message.find({
+        $or: [
+          { sender: currentUserId, recipient: otherUserId },
+          { sender: otherUserId, recipient: currentUserId },
+        ],
+      })
+        .sort({ timestamp: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit);
 
-    const messages = await Message.find({
-      $or: [
-        { sender: currentUserId, recipient: otherUserId },
-        { sender: otherUserId, recipient: currentUserId }
-      ]
-    })
-      .sort({ timestamp: -1 })
-      .skip((page - 1) * limit)
-      .limit(limit);
+      const total = await Message.countDocuments({
+        $or: [
+          { sender: currentUserId, recipient: otherUserId },
+          { sender: otherUserId, recipient: currentUserId },
+        ],
+      });
 
-    const total = await Message.countDocuments({
-      $or: [
-        { sender: currentUserId, recipient: otherUserId },
-        { sender: otherUserId, recipient: currentUserId }
-      ]
-    });
+      res.json({
+        messages: messages.reverse(),
+        currentPage: page,
+        totalPages: Math.ceil(total / limit),
+        totalMessages: total,
+      });
+    } catch (error) {
+      res.status(500).json({ message: "Error fetching chat history", error });
+    }
+  },
+);
 
-    res.json({
-      messages: messages.reverse(),
-      currentPage: page,
-      totalPages: Math.ceil(total / limit),
-      totalMessages: total
-    });
-  } catch (error) {
-    res.status(500).json({ message: 'Error fetching chat history', error });
-  }
-});
-
-export default router
+export default router;

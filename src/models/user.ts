@@ -9,7 +9,14 @@ interface IUser extends Document {
   isVerified: boolean;
   verificationToken: string | null;
   verificationTokenExpires: Date | null;
+  updatedAt: Date;
   comparePassword: (test_password: string) => Promise<boolean>;
+  resetPasswordToken: string | null;
+  resetPasswordExpires: Date | null;
+  gender: string;
+  genderPreference: string;
+  getGender: () => string;
+  getGenderPreference: () => string;
 }
 
 const UserSchema: Schema = new Schema({
@@ -18,9 +25,21 @@ const UserSchema: Schema = new Schema({
   password: { type: String, required: true },
   isVerified: { type: Boolean, default: false },
   verificationToken: { type: String, default: null },
+  updatedAt: { type: Date, default: Date.now },
   verificationTokenExpires: { type: Date, default: null },
+  resetPasswordToken: { type: String, default: null },
+  resetPasswordExpires: { type: Date, default: null },
+  gender: {
+    type: String,
+    enum: ["male", "female", "other"],
+    required: true,
+  },
+  genderPreference: {
+    type: String,
+    enum: ["male", "female", "any"],
+    default: "any",
+  },
 });
-
 
 UserSchema.pre<IUser>("save", async function (next) {
   if (!this.isModified("password")) {
@@ -31,11 +50,16 @@ UserSchema.pre<IUser>("save", async function (next) {
   this.password = hashedPassword;
   next();
 });
+UserSchema.methods.getGender = function () {
+  return this.gender as string;
+};
 
+UserSchema.methods.getGenderPreference = function () {
+  return this.genderPreference as string;
+};
 
 UserSchema.methods.comparePassword = async function (test_password: string) {
   return await bcrypt.compare(test_password, this.password);
 };
-
 
 export default mongoose.model<IUser>("User", UserSchema);
