@@ -2,21 +2,19 @@ import { Router, Request, Response } from "express";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import mongoose from "mongoose";
+import {
+  sendPasswordResetEmail,
+  sendVerificationEmail,
+} from "../middleware/emailer";
 
 import config from "../config";
 import User from "../models/user";
 import {
+  AuthRequest,
   authenticateNonGuestToken,
   authenticateToken,
+  verifyToken,
 } from "../middleware/auth";
-
-export interface AuthRequest extends Request {
-  user?: {
-    _id: mongoose.Types.ObjectId;
-    isGuest?: boolean;
-    canCall?: boolean;
-  };
-}
 
 const router = Router();
 
@@ -69,6 +67,11 @@ router.post("/register", async (req: Request, res: Response) => {
     await newUser.save();
 
     // TODO: Send verification email here
+    await sendVerificationEmail(
+      newUser.email,
+      newUser.username,
+      verificationToken,
+    );
 
     res.status(201).json({
       success: true,
@@ -118,6 +121,56 @@ router.get("/verify/:token", async (req, res) => {
     res.status(200).json({ message: "Email verified successfully" });
   } catch (error) {
     res.status(500).json({ message: "Error verifying email" });
+  }
+});
+
+router.post("/check-token", (req: Request, res: Response) => {
+  const token = req.header("Authorization")?.replace("Bearer ", "");
+
+  if (!token) {
+    return res.status(401).json({
+      success: false,
+      message: "No token provided",
+      valid: false,
+    });
+  }
+
+  try {
+    const decoded = verifyToken(token);
+
+    // Check if the token has expired
+    const currentTimestamp = Math.floor(Date.now() / 1000);
+    if (decoded.exp < currentTimestamp) {
+      return res.status(401).json({
+        success: false,
+        message: "Token has expired",
+        valid: false,
+      });
+    }
+
+    // Token is valid
+    res.json({
+      success: true,
+      message: "Token is valid",
+      valid: true,
+      data: {
+        userId: decoded._id,
+        username: decoded.username,
+        isGuest: decoded.isGuest,
+        canCall: decoded.canCall,
+        expiresAt: new Date(decoded.exp * 1000).toISOString(),
+      },
+    });
+  } catch (error) {
+    res.status(401).json({
+      success: false,
+      message: "Invalid token",
+      valid: false,
+      error:
+        process.env.NODE_ENV === "development"
+          ? (error as Error).message
+          : undefined,
+    });
   }
 });
 
@@ -192,9 +245,11 @@ router.post("/login", async (req: Request, res: Response) => {
     }
 
     // Generate token
-    const token = jwt.sign({ _id: user._id }, config.JWT_SECRET, {
-      expiresIn: "1h",
-    });
+    const token = jwt.sign(
+      { _id: user._id, username: user.username, isGuest: false, canCall: true },
+      config.JWT_SECRET,
+      { expiresIn: "1h" },
+    );
 
     res.json({
       success: true,
@@ -341,13 +396,57 @@ router.put(
 
 router.post("/guest-access", async (req: Request, res: Response) => {
   try {
+    const { gender, genderPreference } = req.body;
+
     const guestId = new mongoose.Types.ObjectId();
+    const guestUsername = `Guest_${crypto.randomBytes(3).toString("hex")}`;
+    const guestEmail = `${guestUsername}@temporary.com`;
+    const guestPassword = crypto.randomBytes(10).toString("hex");
+
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour from now
+
+    const guestUser = new User({
+      _id: guestId,
+      username: guestUsername,
+      email: guestEmail,
+      password: guestPassword,
+      isVerified: true,
+      isTemporary: true,
+      expiresAt: expiresAt,
+      gender: gender || "other",
+      genderPreference: genderPreference || "any",
+    });
+
+    await guestUser.save();
 
     const token = jwt.sign(
-      { _id: guestId, isGuest: true, canCall: true },
+      {
+        _id: guestId,
+        username: guestUsername,
+        isGuest: true,
+        canCall: true,
+        gender: gender || "other",
+        genderPreference: genderPreference || "any",
+      },
       config.JWT_SECRET,
       { expiresIn: "1h" },
     );
+
+    // Schedule user deletion
+    setTimeout(
+      async () => {
+        try {
+          await User.findByIdAndDelete(guestId);
+          console.log(`Temporary user ${guestUsername} has been deleted.`);
+        } catch (error) {
+          console.error(
+            `Error deleting temporary user ${guestUsername}:`,
+            error,
+          );
+        }
+      },
+      60 * 60 * 1000,
+    ); // 1 hour
 
     res.json({
       success: true,
@@ -356,9 +455,11 @@ router.post("/guest-access", async (req: Request, res: Response) => {
         token,
         user: {
           id: guestId,
-          username: "Guest",
+          username: guestUsername,
           isGuest: true,
           canCall: true,
+          gender: gender || "other",
+          genderPreference: genderPreference || "any",
         },
       },
       tokenInfo: {
@@ -443,8 +544,7 @@ router.post("/forgot-password", async (req: Request, res: Response) => {
     await user.save();
 
     // Send password reset email
-    const resetUrl = `http://myaddress/reset-password/${resetToken}`;
-    // await sendPasswordResetEmail(user.email, resetUrl);
+    await sendPasswordResetEmail(user.email, user.username, resetToken);
 
     res.status(200).json({
       success: true,

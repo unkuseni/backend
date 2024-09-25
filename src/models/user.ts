@@ -17,10 +17,12 @@ interface IUser extends Document {
   genderPreference: string;
   getGender: () => string;
   getGenderPreference: () => string;
+  isTemporary: boolean;
+  expiresAt: Date;
 }
 
 const UserSchema: Schema = new Schema({
-  username: { type: String, required: true },
+  username: { type: String, required: true, unique: true },
   email: { type: String, required: true },
   password: { type: String, required: true },
   isVerified: { type: Boolean, default: false },
@@ -32,13 +34,14 @@ const UserSchema: Schema = new Schema({
   gender: {
     type: String,
     enum: ["male", "female", "other"],
-    required: true,
   },
   genderPreference: {
     type: String,
     enum: ["male", "female", "any"],
     default: "any",
   },
+  isTemporary: { type: Boolean, default: false },
+  expiresAt: { type: Date },
 });
 
 UserSchema.pre<IUser>("save", async function (next) {

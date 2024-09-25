@@ -1,10 +1,12 @@
 import { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import config from "../config";
+import mongoose from "mongoose";
 
 export interface AuthRequest extends Request {
   user?: {
-    _id: string;
+    _id: mongoose.Types.ObjectId;
+    username: string;
     isGuest?: boolean;
     canCall?: boolean;
   };
@@ -23,9 +25,10 @@ export const authenticateToken = (
   jwt.verify(token, config.JWT_SECRET, (err: any, user: any) => {
     if (err) return res.sendStatus(403);
     req.user = {
-      _id: user._id,
+      _id: mongoose.Types.ObjectId.createFromHexString(user._id),
+      username: user.username,
       isGuest: user.isGuest || false,
-      canCall: user.isGuest || !user.isGuest, // Both guests and regular users can call
+      canCall: user.canCall || false,
     };
     next();
   });
@@ -44,6 +47,16 @@ export const canChat = (
     });
   }
   next();
+};
+
+export const verifyToken = (token: string) => {
+  return jwt.verify(token, config.JWT_SECRET) as jwt.JwtPayload & {
+    _id: string;
+    username: string;
+    isGuest: boolean;
+    canCall: boolean;
+    exp: number; // Add this line
+  };
 };
 
 export const canCall = (

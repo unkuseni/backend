@@ -1,10 +1,21 @@
 import { Router, Response } from "express";
-import { authenticateToken } from "../middleware/auth";
-import { AuthRequest } from "./authRoutes";
+import { AuthRequest, authenticateToken } from "../middleware/auth";
+
 import Message from "../models/message";
 import Conversation from "../models/conversation";
+import User from "../models/user";
 
 const router = Router();
+
+export async function getUserByUsername(username: string) {
+  try {
+    const user = await User.findOne({ username });
+    return user;
+  } catch (error) {
+    console.error("Error fetching user by username:", error);
+    throw new Error("Failed to fetch user");
+  }
+}
 
 router.post("/chat", authenticateToken, (req: AuthRequest, res: Response) => {
   try {
@@ -21,13 +32,13 @@ router.post("/chat", authenticateToken, (req: AuthRequest, res: Response) => {
       });
     }
 
-    const { receiverId } = req.body;
-    const senderId = req.user?._id;
+    const { receiverUsername } = req.body;
+    const senderUsername = req.user?.username;
 
-    if (!senderId || !receiverId) {
+    if (!senderUsername || !receiverUsername) {
       return res.status(400).json({
         success: false,
-        message: "Both sender and receiver IDs are required",
+        message: "Both sender and receiver usernames are required",
       });
     }
 
@@ -35,8 +46,8 @@ router.post("/chat", authenticateToken, (req: AuthRequest, res: Response) => {
       success: true,
       message: "Chat initiated successfully",
       data: {
-        senderId,
-        receiverId,
+        senderUsername,
+        receiverUsername,
       },
       info: {
         nextSteps: [
@@ -159,28 +170,42 @@ router.post(
     }
   },
 );
-
 router.get(
-  "/chat-history/:userId",
+  "/chat-history/:username",
   authenticateToken,
   async (req: AuthRequest, res: Response) => {
     try {
-      const currentUserId = req.user?._id;
-      const otherUserId = req.params.userId;
+      const currentUsername = req.user?.username;
+      const otherUsername = req.params.username;
       const page = parseInt(req.query.page as string) || 1;
       const limit = parseInt(req.query.limit as string) || 50;
 
-      if (!currentUserId || !otherUserId) {
+      console.log("Current Username:", currentUsername);
+      console.log("Other Username:", otherUsername);
+
+      if (!currentUsername || !otherUsername) {
         return res.status(400).json({
           success: false,
-          message: "Both current user and other user IDs are required",
+          message: "Both current user and other user usernames are required",
+        });
+      }
+
+      const [currentUser, otherUser] = await Promise.all([
+        User.findOne({ username: currentUsername }),
+        User.findOne({ username: otherUsername }),
+      ]);
+
+      if (!currentUser || !otherUser) {
+        return res.status(404).json({
+          success: false,
+          message: "One or both users not found",
         });
       }
 
       const messages = await Message.find({
         $or: [
-          { sender: currentUserId, recipient: otherUserId },
-          { sender: otherUserId, recipient: currentUserId },
+          { sender: currentUser._id, recipient: otherUser._id },
+          { sender: otherUser._id, recipient: currentUser._id },
         ],
       })
         .sort({ timestamp: -1 })
@@ -191,8 +216,8 @@ router.get(
 
       const total = await Message.countDocuments({
         $or: [
-          { sender: currentUserId, recipient: otherUserId },
-          { sender: otherUserId, recipient: currentUserId },
+          { sender: currentUser._id, recipient: otherUser._id },
+          { sender: otherUser._id, recipient: currentUser._id },
         ],
       });
 
@@ -210,15 +235,6 @@ router.get(
             messagesPerPage: limit,
           },
         },
-        info: {
-          nextSteps: [
-            page < totalPages
-              ? "Load more messages by incrementing the page number"
-              : "All messages loaded",
-            "Display messages in chronological order",
-            "Update UI with new messages in real-time",
-          ],
-        },
       });
     } catch (error) {
       console.error("Error fetching chat history:", error);
@@ -235,25 +251,35 @@ router.get(
 );
 
 router.delete(
-  "/chat-history/:userId",
+  "/chat-history/:otherUsername",
   authenticateToken,
   async (req: AuthRequest, res: Response) => {
     try {
-      const currentUserId = req.user?._id;
-      const otherUserId = req.params.userId;
+      const currentUsername = req.user?.username;
+      const otherUsername = req.params.otherUsername;
 
-      if (!currentUserId || !otherUserId) {
+      if (!currentUsername || !otherUsername) {
         return res.status(400).json({
           success: false,
-          message: "Both current user and other user IDs are required",
+          message: "Both current user and other user usernames are required",
         });
       }
 
+      // Find the conversation between the two users
+      const conversation = await Conversation.findOne({
+        participants: { $all: [currentUsername, otherUsername] },
+      });
+
+      if (!conversation) {
+        return res.status(404).json({
+          success: false,
+          message: "No conversation found between the specified users",
+        });
+      }
+
+      // Delete all messages in the conversation
       const result = await Message.deleteMany({
-        $or: [
-          { sender: currentUserId, recipient: otherUserId },
-          { sender: otherUserId, recipient: currentUserId },
-        ],
+        conversation: conversation._id,
       });
 
       if (result.deletedCount === 0) {
@@ -262,6 +288,9 @@ router.delete(
           message: "No messages found to delete",
         });
       }
+
+      // Optionally, you might want to delete the conversation as well
+      await Conversation.findByIdAndDelete(conversation._id);
 
       res.json({
         success: true,

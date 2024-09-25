@@ -5,11 +5,12 @@ import { Server as SocketIOServer, Socket } from "socket.io";
 import User from "../models/user";
 import Message from "../models/message";
 import Conversation from "../models/conversation";
+import { getUserByUsername } from "../routes/chatRoutes";
 import config from "../config";
 import { callQueue } from "../middleware/callQueue";
 
 interface ExtendedSocket extends Socket {
-  userId?: string;
+  username?: string;
   isGuest?: boolean;
 }
 
@@ -33,10 +34,10 @@ export default function setupChatServer(httpServer: HTTPServer) {
       async (preferences: { genderPreference: string }) => {
         const userInfo = getUserInfoFromSocket(socket);
         if (userInfo) {
-          const user = await User.findById(userInfo.userId);
+          const user = await User.findOne({ username: userInfo.username });
           if (user) {
             callQueue.addToQueue({
-              id: userInfo.userId,
+              id: userInfo.username,
               isGuest: userInfo.isGuest,
               socketId: socket.id,
               gender: user.getGender(),
@@ -52,23 +53,42 @@ export default function setupChatServer(httpServer: HTTPServer) {
     socket.on("leaveCallQueue", () => {
       const userInfo = getUserInfoFromSocket(socket);
       if (userInfo) {
-        callQueue.removeFromQueue(userInfo.userId);
+        callQueue.removeFromQueue(userInfo.username);
         socket.emit("queueLeft");
+      }
+    });
+
+    socket.on("callEnded", async () => {
+      const userInfo = getUserInfoFromSocket(socket);
+      if (userInfo) {
+        const user = await User.findOne({ username: userInfo.username });
+        if (user) {
+          callQueue.addToQueue({
+            id: userInfo.username,
+            isGuest: userInfo.isGuest,
+            socketId: socket.id,
+            gender: user.getGender(),
+            genderPreference: user.getGenderPreference(),
+          });
+        }
       }
     });
 
     socket.on("authenticate", async (token: string) => {
       try {
         const decoded = jwt.verify(token, config.JWT_SECRET) as {
-          _id: string;
+          username: string;
           isGuest: boolean;
           canCall: boolean;
         };
 
-        socket.userId = decoded._id;
+        socket.username = decoded.username;
         socket.isGuest = decoded.isGuest;
 
-        connectedUsers.set(decoded._id, { socket, isGuest: decoded.isGuest });
+        connectedUsers.set(decoded.username, {
+          socket,
+          isGuest: decoded.isGuest,
+        });
 
         socket.emit("authenticated", {
           isGuest: decoded.isGuest,
@@ -76,19 +96,21 @@ export default function setupChatServer(httpServer: HTTPServer) {
         });
 
         if (!decoded.isGuest) {
-          // Fetch and send missed messages only for non-guest users
-          const missedMessages = await Message.find({
-            recipient: decoded._id,
-            timestamp: { $gt: Date.now() - 60 * 60 * 1000 },
-          }).sort({ timestamp: 1 });
+          const user = await User.findOne({ username: decoded.username });
+          if (user) {
+            const missedMessages = await Message.find({
+              recipient: user._id,
+              timestamp: { $gt: Date.now() - 60 * 60 * 1000 },
+            }).sort({ timestamp: 1 });
 
-          missedMessages.forEach((message) => {
-            socket.emit("new_message", {
-              senderId: message.sender,
-              content: message.content,
-              timestamp: message.timestamp,
+            missedMessages.forEach((message) => {
+              socket.emit("new_message", {
+                senderUsername: message.sender,
+                content: message.content,
+                timestamp: message.timestamp,
+              });
             });
-          });
+          }
         }
       } catch (error) {
         socket.emit("authentication_error");
@@ -101,7 +123,7 @@ export default function setupChatServer(httpServer: HTTPServer) {
         const recipientInfo = connectedUsers.get(data.recipientId);
         if (recipientInfo) {
           recipientInfo.socket.emit("user_typing", {
-            senderId: userInfo.userId,
+            senderId: userInfo.username,
           });
         }
       }
@@ -113,7 +135,7 @@ export default function setupChatServer(httpServer: HTTPServer) {
         const recipientInfo = connectedUsers.get(data.recipientId);
         if (recipientInfo) {
           recipientInfo.socket.emit("user_stop_typing", {
-            senderId: userInfo.userId,
+            senderId: userInfo.username,
           });
         }
       }
@@ -122,20 +144,33 @@ export default function setupChatServer(httpServer: HTTPServer) {
     // Chat code here
     socket.on(
       "message",
-      async (data: { conversationId: string; content: string }) => {
+      async (data: {
+        conversationId: string;
+        content: string;
+        recipientUsername: string;
+      }) => {
         const userInfo = getUserInfoFromSocket(socket);
         if (userInfo && !userInfo.isGuest) {
           try {
-            const conversation = await Conversation.findById(
-              data.conversationId,
-            );
+            let conversation;
+            if (data.conversationId) {
+              conversation = await Conversation.findById(data.conversationId);
+            }
             if (!conversation) {
-              throw new Error("Conversation not found");
+              // Create a new conversation if it doesn't exist
+              const recipient = await getUserByUsername(data.recipientUsername);
+              if (!recipient) {
+                throw new Error("Recipient not found");
+              }
+              conversation = new Conversation({
+                participants: [userInfo.username, recipient.username],
+              });
+              await conversation.save();
             }
 
             const message = new Message({
               conversation: data.conversationId,
-              sender: userInfo.userId,
+              sender: userInfo.username,
               content: data.content,
             });
             await message.save();
@@ -147,14 +182,14 @@ export default function setupChatServer(httpServer: HTTPServer) {
 
             // Send the message to all participants in the conversation
             for (const participantId of conversation.participants) {
-              if (participantId.toString() !== userInfo.userId) {
+              if (participantId.toString() !== userInfo.username) {
                 const recipientInfo = connectedUsers.get(
                   participantId.toString(),
                 );
                 if (recipientInfo) {
                   recipientInfo.socket.emit("new_message", {
                     conversationId: data.conversationId,
-                    senderId: userInfo.userId,
+                    senderId: userInfo.username,
                     content: data.content,
                     timestamp: message.timestamp,
                   });
@@ -190,7 +225,7 @@ export default function setupChatServer(httpServer: HTTPServer) {
           const recipientInfo = connectedUsers.get(data.recipientId);
           if (recipientInfo) {
             recipientInfo.socket.emit("video_call_offer", {
-              callerId: userInfo.userId,
+              callerId: userInfo.username,
               offer: data.offer,
             });
           }
@@ -218,7 +253,7 @@ export default function setupChatServer(httpServer: HTTPServer) {
           const recipientInfo = connectedUsers.get(data.recipientId);
           if (recipientInfo) {
             recipientInfo.socket.emit("ice_candidate", {
-              senderId: userInfo.userId,
+              senderId: userInfo.username,
               candidate: data.candidate,
             });
           }
@@ -227,8 +262,8 @@ export default function setupChatServer(httpServer: HTTPServer) {
     );
 
     socket.on("disconnect", () => {
-      if (socket.userId) {
-        connectedUsers.delete(socket.userId);
+      if (socket.username) {
+        connectedUsers.delete(socket.username);
       }
       console.log("A user disconnected");
     });
@@ -259,10 +294,10 @@ export default function setupChatServer(httpServer: HTTPServer) {
 
   function getUserInfoFromSocket(
     socket: ExtendedSocket,
-  ): { userId: string; isGuest: boolean } | null {
-    for (const [userId, info] of connectedUsers.entries()) {
+  ): { username: string; isGuest: boolean } | null {
+    for (const [username, info] of connectedUsers.entries()) {
       if (info.socket === socket) {
-        return { userId, isGuest: info.isGuest };
+        return { username, isGuest: info.isGuest };
       }
     }
     return null;
