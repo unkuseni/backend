@@ -126,7 +126,7 @@ export const register = async (req: Request, res: Response) => {
  *
  * @throws {HTTPError} If the user is not found, or if the verification token is invalid or expired.
  */
-export const verifyEmailToken = async (req, res) => {
+export const verifyEmailToken = async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
     const user = await User.findOne({

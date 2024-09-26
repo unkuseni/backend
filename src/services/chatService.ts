@@ -5,7 +5,7 @@ import { Server as SocketIOServer, Socket } from "socket.io";
 import User from "../models/user";
 import Message from "../models/message";
 import Conversation from "../models/conversation";
-import { getUserByUsername } from "../routes/chatRoutes";
+import { getUserByUsername } from "../controllers/chatController";
 import config from "../config";
 import { callQueue } from "../middleware/callQueue";
 
